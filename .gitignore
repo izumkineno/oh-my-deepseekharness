@@ -6,3 +6,5 @@ node_modules/
 .omd/
 # 本地打包产物
 *.tgz
+
+.agent-teams

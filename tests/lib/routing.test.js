@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { loadAssets } from '../../lib/skills.js'
+import { Config } from '../../lib/config.js'
 import {
   TIER_ORDER, SIGNAL_FEATURES, TIER_BANDS,
   suggestTier, clampTier, buildRoutingTable, routeOnce, recordFallback,
@@ -158,6 +159,28 @@ test('C3 表外任务 e2e：落会话默认档 + run-state.json 记 fallback:tru
 
 test('TIER_BANDS 与协议渲染同源（0-2/3-5/6-8）', () => {
   expect(TIER_BANDS).toEqual({ lowMax: 2, mediumMax: 5 })
+})
+
+test('suggestTier 分带可配：自定义 bands 改建议档；矛盾配置显式抛错', () => {
+  // 总分 4（critical=2 + multiFile=1 + costly=1 + selfContained=0）：默认分带 → medium
+  const features = { taskType: 'critical', contactSurface: 'multiFile', failureReversibility: 'costly', contextSelfContainedness: 'selfContained' }
+  expect(suggestTier(features)).toBe('medium')
+  expect(suggestTier(features, { lowMax: 4, mediumMax: 6 })).toBe('low')
+  expect(suggestTier(features, { lowMax: 1, mediumMax: 3 })).toBe('high')
+  expect(() => suggestTier(features, { lowMax: 5, mediumMax: 2 })).toThrow(/lowMax.*mediumMax/)
+})
+
+test('routeOnce bands 注入：Config.routing（volatile 叶）直传可解包', () => {
+  const config = Config.parse({ routing: { lowMax: 4, mediumMax: 6 } })
+  const table = buildRoutingTable([{ name: 'omd-agent-executor', tier: 'high' }])
+  const features = { taskType: 'critical', contactSurface: 'multiFile', failureReversibility: 'costly', contextSelfContainedness: 'selfContained' }
+  const d = routeOnce({ table, role: 'omd-agent-executor', features, dispatchId: 'bands-001', bands: config.routing, defaultTier: config.routing.defaultTier })
+  expect(d.suggestedTier).toBe('low') // 总分 4 ≤ lowMax 4（volatile 解包生效）
+  expect(d.tier).toBe('low')
+  expect(d.fallback).toBe(false)
+  // 缺 bands 参数 → 存量默认分带（向后兼容）
+  const d2 = routeOnce({ table, role: 'omd-agent-executor', features, dispatchId: 'bands-002' })
+  expect(d2.suggestedTier).toBe('medium')
 })
 
 // M1 修复回归：fallback 审计走权威路径 + withFileLock 互斥——并发双调不丢更新、恰一最终值

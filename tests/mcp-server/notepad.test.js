@@ -149,3 +149,31 @@ test('评审A-4：不可解析 at 入口即拒（不再产生永不过期条目�
   await expect(t.writePriority({ cwd, text: '坏时间戳', at: 'garbage' })).rejects.toThrow('不是可解析时间戳')
   expect((await t.stats({ cwd })).working).toBe(0)
 })
+
+// ---------- ⑤ OMD_MEMORY 快照解析（Config memory.workingTtlDays → working 保质期） ----------
+
+test('workingTtlDays 经 env 生效：30 天保留 8 天前条目；1 天清理 2 天前条目', async () => {
+  const cwd30 = await mkdtemp(join(tmpdir(), 'omd-'))
+  const t30 = makeNotepadTools({ stateDir: '.omd', memory: { workingTtlDays: 30 } })
+  await t30.writeWorking({ cwd: cwd30, text: '八天前', at: new Date(Date.now() - 8 * 86400_000).toISOString() })
+  await t30.writeWorking({ cwd: cwd30, text: '新条目' })
+  expect(await t30.read({ cwd: cwd30 })).toContain('八天前')
+
+  const cwd1 = await mkdtemp(join(tmpdir(), 'omd-'))
+  const t1 = makeNotepadTools({ stateDir: '.omd', memory: { workingTtlDays: 1 } })
+  await t1.writeWorking({ cwd: cwd1, text: '两天前', at: new Date(Date.now() - 2 * 86400_000).toISOString() })
+  await t1.writeWorking({ cwd: cwd1, text: '新条目' })
+  const doc1 = await t1.read({ cwd: cwd1 })
+  expect(doc1).not.toContain('两天前')
+  expect(doc1).toContain('新条目')
+})
+
+test('workingTtlDays 非法值回退 7 天默认', async () => {
+  for (const memory of [{}, { workingTtlDays: 0 }, { workingTtlDays: -3 }, { workingTtlDays: NaN }, { workingTtlDays: 'x' }]) {
+    const cwd = await mkdtemp(join(tmpdir(), 'omd-'))
+    const t = makeNotepadTools({ stateDir: '.omd', memory })
+    await t.writeWorking({ cwd, text: '八天前', at: new Date(Date.now() - 8 * 86400_000).toISOString() })
+    await t.writeWorking({ cwd, text: '新条目' })
+    expect(await t.read({ cwd })).not.toContain('八天前')
+  }
+})

@@ -50,6 +50,7 @@ test('阶段机非法迁移显式拒绝（plan→verify / exec→fix / 终态后
 
 test('fix 循环上限：默认 3 次用尽后 fix→exec 拒绝，只能 failed/cancelled', () => {
   let s = initialPhaseState()
+  expect(s.maxFixLoops).toBe(3) // 缺省 = DEFAULT_MAX_FIX_LOOPS（Config team.maxFixLoops 默认同值）
   for (const to of ['team-exec', 'team-verify', 'team-fix']) s = transitionPhase(s, to, { note: to === 'team-exec' && s.phase === 'team-plan' ? '跳过 prd' : '' })
   for (let i = 0; i < 3; i++)
     for (const to of ['team-exec', 'team-verify', 'team-fix']) s = transitionPhase(s, to)
@@ -57,6 +58,34 @@ test('fix 循环上限：默认 3 次用尽后 fix→exec 拒绝，只能 failed
   expect(() => transitionPhase(s, 'team-exec')).toThrow(/fix 循环超限/)
   const sFailed = transitionPhase(s, 'failed')
   expect(sFailed.phase).toBe('failed')
+})
+
+test('fix 循环上限可配：initialPhaseState opts 写入新 run；旧 run（无该键）沿用默认 3', () => {
+  expect(initialPhaseState(undefined, { maxFixLoops: 1 }).maxFixLoops).toBe(1)
+  let s = initialPhaseState(undefined, { maxFixLoops: 1 })
+  for (const to of ['team-exec', 'team-verify', 'team-fix']) s = transitionPhase(s, to, { note: to === 'team-exec' && s.phase === 'team-plan' ? '跳过 prd' : '' })
+  s = transitionPhase(s, 'team-exec') // 第 1 次回边 ok（fixLoops=1）
+  expect(s.fixLoops).toBe(1)
+  s = transitionPhase(transitionPhase(s, 'team-verify'), 'team-fix')
+  expect(() => transitionPhase(s, 'team-exec')).toThrow(/fix 循环超限/) // 第 2 次回边拒绝
+  // 旧 phase.json 无 maxFixLoops 键 → ?? 3（向后兼容）
+  let old = { phase: 'team-fix', fixLoops: 3, history: [] }
+  expect(() => transitionPhase(old, 'team-exec')).toThrow(/fix 循环超限/)
+})
+
+test('transitionPhasePersist：maxFixLoops 只在懒建新 run 时写入，存量 run 不追溯', async () => {
+  const { cwd } = await tmp()
+  try {
+    const s = await transitionPhasePersist({ cwd, runId: 'r-new', to: 'team-exec', note: '跳过 prd', maxFixLoops: 5 })
+    expect(s.maxFixLoops).toBe(5)
+    expect((await readPhaseState(cwd, 'r-new')).maxFixLoops).toBe(5)
+    // 存量 run：再次迁移不覆盖 phase.json 旧值
+    const s2 = await transitionPhasePersist({ cwd, runId: 'r-new', to: 'team-verify', maxFixLoops: 1 })
+    expect(s2.maxFixLoops).toBe(5)
+    // 缺省 → 3
+    const s3 = await transitionPhasePersist({ cwd, runId: 'r-def', to: 'team-exec', note: '跳过 prd' })
+    expect(s3.maxFixLoops).toBe(3)
+  } finally { await rm(cwd, { recursive: true, force: true }) }
 })
 
 test('任意非终态可转 cancelled；持久化迁移懒建 initial 态', async () => {

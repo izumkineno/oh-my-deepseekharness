@@ -17,6 +17,12 @@ import {
 } from '../../lib/team.js'
 
 export function makeTeamTools(env) {
+  // MCP 进程配置快照（lib/index.js 经 OMD_TEAM 注入的 Config team 段；缺席=旧挂载/直调，
+  // 回退存量默认值）。调用级显式参数永远覆盖 env（覆盖链：调用参数 > OMD_TEAM > 内置默认）。
+  const teamCfg = env?.team ?? {}
+  const envStaleAfterMs = teamCfg.staleAfterMs
+  const envMaxFixLoops = teamCfg.maxFixLoops
+  const envCasRetries = teamCfg.casRetries
   /**
    * notepad stats 取数（B5 修订）：caller 显式传 stateDir 时走 caller 的 stateDir，
    * 否则走 env.stateDir。这样 todo 数据源与 run-state 写位置在同一目录，
@@ -46,10 +52,10 @@ export function makeTeamTools(env) {
    * patch 经 buildMirrorPatch 构造七字段镜像键，writeRunStateMirror 内做 CAS + 重试 + 覆盖写兜底。
    * todo 字段可由调用方显式传，否则从 cwd 的 notepad stats 自动取（stateDir 透传，与 run-state 同位置）。
    */
-  async function writeMirror({ cwd, stateDir = '.omd', patch = {}, expectUpdatedAt, retries = 3 }) {
+  async function writeMirror({ cwd, stateDir = '.omd', patch = {}, expectUpdatedAt, retries }) {
     const todo = patch.todo ?? buildTodoSummary({ stats: await notepadStats(cwd, stateDir) })
     const mirrorPatch = buildMirrorPatch({ ...patch, todo })
-    return await writeRunStateMirror({ cwd, stateDir, patch: mirrorPatch, expectUpdatedAt, retries })
+    return await writeRunStateMirror({ cwd, stateDir, patch: mirrorPatch, expectUpdatedAt, retries: retries ?? envCasRetries ?? 3 })
   }
 
   /**
@@ -64,7 +70,7 @@ export function makeTeamTools(env) {
     begin, dispose, scanOrphansTool, writeMirror, writeTreeState,
     // ---- v0.4 领队运行时面（lib/team.js 接线）----
     phaseTransition: ({ cwd, runId, to, note, stateDir = '.omd' }) =>
-      transitionPhasePersist({ cwd, runId, to, note, stateDir }),
+      transitionPhasePersist({ cwd, runId, to, note, stateDir, maxFixLoops: envMaxFixLoops }),
     phaseStatus: ({ cwd, runId, stateDir = '.omd' }) => readPhaseState(cwd, runId, stateDir),
     registerWorker: ({ cwd, runId, worker, stateDir = '.omd' }) =>
       registerWorker({ cwd, runId, worker, stateDir }),
@@ -80,7 +86,7 @@ export function makeTeamTools(env) {
     mailAck: ({ cwd, runId, direction, workerId, seqs, stateDir = '.omd' }) =>
       ackMail({ cwd, runId, direction, workerId, seqs, stateDir }),
     heartbeatScan: ({ cwd, runId, staleAfterMs, stateDir = '.omd' }) =>
-      scanHeartbeat({ cwd, runId, staleAfterMs, stateDir }),
+      scanHeartbeat({ cwd, runId, staleAfterMs: staleAfterMs ?? envStaleAfterMs ?? 300_000, stateDir }),
     mergePlan: ({ cwd, runId, stateDir = '.omd' }) => buildMergePlan({ cwd, runId, stateDir }),
   }
 }

@@ -5,9 +5,13 @@ import { atomicWriteText } from '../lib/atomic.mjs'
 import { omdPaths } from '../lib/paths.mjs'
 import { parseNotepad, serializeNotepad, formatEntry, entryDate, isEntryLine } from '../lib/markdown.mjs'
 
-const WORKING_TTL_MS = 7 * 86400_000  // 规格 §5.3：7 天
+const WORKING_TTL_MS = 7 * 86400_000  // 规格 §5.3：7 天（可配：memory.workingTtlDays，经 OMD_MEMORY 注入）
+const DAY_MS = 86400_000
 
 export function makeNotepadTools(env) {
+  // env.memory.workingTtlDays（天）→ ms；非正数/非数字一律回退 7 天（配置损坏不炸 server）。
+  const ttlDays = Number(env?.memory?.workingTtlDays)
+  const workingTtlMs = Number.isFinite(ttlDays) && ttlDays > 0 ? ttlDays * DAY_MS : WORKING_TTL_MS
   async function load(cwd) {
     let text = ''
     try { text = await readFile(omdPaths({ cwd, stateDir: env.stateDir, sessionId: '_' }).notepad, 'utf8') } catch {}
@@ -17,7 +21,7 @@ export function makeNotepadTools(env) {
     await atomicWriteText(omdPaths({ cwd, stateDir: env.stateDir, sessionId: '_' }).notepad, serializeNotepad(zones))
   }
   function pruneZones(zones) {
-    const cutoff = Date.now() - WORKING_TTL_MS
+    const cutoff = Date.now() - workingTtlMs
     zones.working = zones.working.filter(l => { const d = entryDate(l); return !Number.isFinite(d) || d >= cutoff })
     return zones  // priority / manual 不动
   }

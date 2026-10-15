@@ -9,7 +9,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { makeCodeIntelTools, substituteRewrite } from '../../mcp-server/tools/codeintel.mjs'
+import { makeCodeIntelTools, resolveCodeIntelLimits, substituteRewrite } from '../../mcp-server/tools/codeintel.mjs'
 
 const MOCK_LSP = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'mock-lsp.mjs')
 
@@ -237,5 +237,75 @@ test('评审#3：astGrep=false 时 replace 同样显式禁用（search 不再独
   try {
     const t = makeCodeIntelTools({ codeIntel: { astGrep: false } })
     await expect(t.astGrepReplace({ cwd, pattern: 'foo($A)', rewrite: 'bar($A)', lang: 'javascript' })).rejects.toThrow('禁用')
+  } finally { await rm(cwd, { recursive: true, force: true }) }
+})
+
+// ---------- ⑤ OMD_CODE_INTEL 快照解析（Config codeIntel 段 → lsp/search 全局参数） ----------
+
+test('resolveCodeIntelLimits：缺席 env 回退存量默认（直调/旧挂载不炸）', () => {
+  expect(resolveCodeIntelLimits(undefined)).toEqual({
+    initializeTimeoutMs: 10000, requestTimeoutMs: 15000, shutdownTimeoutMs: 5000, maxRestarts: 2, diagnosticsWaitMs: 1500,
+    defaultMaxResults: 50, hardMaxResults: 500, maxFiles: 2000,
+    skipDirs: ['.git', 'node_modules', '.omd', 'dist', 'build', 'out', '.next', 'coverage'],
+  })
+  expect(resolveCodeIntelLimits({})).toEqual(resolveCodeIntelLimits(undefined))
+  expect(resolveCodeIntelLimits({ codeIntel: {} })).toEqual(resolveCodeIntelLimits(undefined))
+})
+
+test('resolveCodeIntelLimits：env 覆盖生效；非法值回退默认（不炸 server）', () => {
+  const limits = resolveCodeIntelLimits({ codeIntel: {
+    lsp: { initializeTimeoutMs: 3000, requestTimeoutMs: 5000, shutdownTimeoutMs: 8000, maxRestarts: 5, diagnosticsWaitMs: 300 },
+    search: { defaultMaxResults: 10, hardMaxResults: 100, maxFiles: 500, skipDirs: ['src'] },
+  } })
+  expect(limits).toEqual({
+    initializeTimeoutMs: 3000, requestTimeoutMs: 5000, shutdownTimeoutMs: 8000, maxRestarts: 5, diagnosticsWaitMs: 300,
+    defaultMaxResults: 10, hardMaxResults: 100, maxFiles: 500, skipDirs: ['src'],
+  })
+  // 空数组=显式一个不跳（合法值，不回退）
+  expect(resolveCodeIntelLimits({ codeIntel: { search: { skipDirs: [] } } }).skipDirs).toEqual([])
+  const bad = resolveCodeIntelLimits({ codeIntel: {
+    lsp: { initializeTimeoutMs: -1, requestTimeoutMs: NaN, shutdownTimeoutMs: 0, maxRestarts: 'x', diagnosticsWaitMs: -5 },
+    search: { defaultMaxResults: 0, hardMaxResults: 2.7, maxFiles: null, skipDirs: 'node_modules' },
+  } })
+  expect(bad).toEqual({
+    initializeTimeoutMs: 10000, requestTimeoutMs: 15000, shutdownTimeoutMs: 5000, maxRestarts: 2, diagnosticsWaitMs: 1500,
+    defaultMaxResults: 50, hardMaxResults: 2, maxFiles: 2000, // hardMaxResults=2.7 取整（正数合法）
+    skipDirs: ['.git', 'node_modules', '.omd', 'dist', 'build', 'out', '.next', 'coverage'], // 非数组回退默认
+  })
+  // 混入非字符串 → 回退默认
+  expect(resolveCodeIntelLimits({ codeIntel: { search: { skipDirs: ['src', 42] } } }).skipDirs)
+    .toEqual(['.git', 'node_modules', '.omd', 'dist', 'build', 'out', '.next', 'coverage'])
+})
+
+test('ast_grep_search：search.defaultMaxResults/hardMaxResults 经 env 生效', async () => {
+  const cwd = await fixture()
+  try {
+    // a.js 3 命中 + b.js 1 命中 + c.ts 1 命中 = 5（javascript+typescript 都扫？lang 过滤——只 javascript：a.js 3 + b.js 1 = 4）
+    const t = makeCodeIntelTools({ codeIntel: { search: { defaultMaxResults: 2, hardMaxResults: 3 } } })
+    const r = await t.astGrepSearch({ cwd, pattern: 'foo($$$ARGS)', lang: 'javascript' })
+    expect(r.count).toBe(2) // 默认 2（非 50）
+    expect(r.truncated).toBe(true)
+    const r2 = await t.astGrepSearch({ cwd, pattern: 'foo($$$ARGS)', lang: 'javascript', maxResults: 99 })
+    expect(r2.count).toBe(3) // 调用值 99 被 hard 3 钳制
+  } finally { await rm(cwd, { recursive: true, force: true }) }
+})
+
+test('ast_grep_search：search.skipDirs 经 env 生效（缺席=默认 8 项；显式覆盖）', async () => {
+  const cwd = await fixture() // fixture 含 node_modules/junk/dep.js（foo(0) 单命中）
+  try {
+    // 缺席 → 默认跳过 node_modules：a.js 的 foo(1) + b.js 的 foo(9) = 2
+    const t0 = makeCodeIntelTools({ codeIntel: {} })
+    const r0 = await t0.astGrepSearch({ cwd, pattern: 'foo($A)', lang: 'javascript' })
+    expect(r0.count).toBe(2)
+    // 显式 [] → 一个不跳：dep.js 的 foo(0) 也计入 = 3
+    const t1 = makeCodeIntelTools({ codeIntel: { search: { skipDirs: [] } } })
+    const r1 = await t1.astGrepSearch({ cwd, pattern: 'foo($A)', lang: 'javascript' })
+    expect(r1.count).toBe(3)
+    expect(r1.matches.some(m => m.file.includes('node_modules'))).toBe(true)
+    // 显式 ['src'] → 只跳 src：仅 dep.js = 1
+    const t2 = makeCodeIntelTools({ codeIntel: { search: { skipDirs: ['src'] } } })
+    const r2 = await t2.astGrepSearch({ cwd, pattern: 'foo($A)', lang: 'javascript' })
+    expect(r2.count).toBe(1)
+    expect(r2.matches[0].file.includes('dep.js')).toBe(true)
   } finally { await rm(cwd, { recursive: true, force: true }) }
 })

@@ -248,3 +248,24 @@ test('output.render：成功 = 路由日志行 + 子代理文本；失败 = 可�
   expect(bad[0].type).toBe('text')
   expect(typeof bad[0].text).toBe('string')
 })
+
+// ---- delegate.provider（高级配置） ----
+
+test('delegate.provider：保留位值（queue/subprocess）注册即显式抛错，不静默走错后端', async () => {
+  const fakes = makeFakes()
+  const ctx = { tools: { register() {} }, logger: { info() {}, warn() {} } }
+  await expect(registerDelegateTool(ctx, def => def, {
+    config: Config.parse({ delegate: { provider: 'queue' } }), roles: [], subagents: fakes.subagents, llm: fakes.llm,
+  })).rejects.toThrow(/尚未实现/)
+  await expect(registerDelegateTool(ctx, def => def, {
+    config: Config.parse({ delegate: { provider: 'subprocess' } }), roles: [], subagents: fakes.subagents, llm: fakes.llm,
+  })).rejects.toThrow(/尚未实现/)
+})
+
+test('resolveDispatch：Config.parse 的 volatile defaultTier 解包生效（表外角色落配置档）', () => {
+  const config = Config.parse({ routing: { defaultTier: 'low' } })
+  expect(typeof config.routing.defaultTier?.get).toBe('function') // 确认是 Volatile 引用
+  const d = resolveDispatch({ config, table: TABLE, args: { role: 'omd-agent-nosuch' }, dispatchId: 'x-vt' })
+  expect(d.fallback).toBe(true)
+  expect(d.tier).toBe('low')
+})

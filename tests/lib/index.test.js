@@ -84,3 +84,47 @@ test('核心服务缺失时 apply 启动即报错（规格 §6.1 例外条款）
   delete ctx.systemPrompt
   await expect(apply(ctx, Config.parse({}), { assetsRoot: '/nonexistent' })).rejects.toThrow()
 })
+
+// ---------- ⑤ MCP 挂载快照（Config mcp/team/memory 段 → ctx.plugin 参数 + 子进程 env） ----------
+
+test('setup 挂载 MCP：mcp.* 进 plugin 参数；team/memory/codeIntel 深解包进 env 快照', async () => {
+  const { ctx } = mockCtx()
+  let captured
+  ctx.plugin = async (_def, cfg) => { captured = cfg }
+  ctx.logger = { info() {}, warn() {} }
+  const assetsRoot = await mkdtemp(join(tmpdir(), 'omd-'))
+  await mkdir(join(assetsRoot, 'skills', 'x'), { recursive: true })
+  await writeFile(join(assetsRoot, 'skills', 'x', 'SKILL.zh.md'), '---\nname: x\ndescription: d\n---\nbody\n')
+  await mkdir(join(assetsRoot, 'agents'), { recursive: true })
+  const { probeReport } = await setup(ctx, Config.parse({
+    stateDir: '.omd-test',
+    mcp: { serverName: 'omd-e2e', failOnStartupError: true, reconnect: { enabled: false, initialDelayMs: 10, maxDelayMs: 20, maxAttempts: 1 } },
+    team: { maxFixLoops: 5, casRetries: 7 },
+    memory: { workingTtlDays: 30 },
+    codeIntel: { lsp: { maxRestarts: 9 } },
+  }), { assetsRoot, defineTool: (x) => x })
+  expect(probeReport.mcpServer.status).toBe('ok')
+  expect(captured.transport).toBe('stdio')
+  expect(captured.serverName).toBe('omd-e2e')
+  expect(captured.command).toBe(process.execPath)
+  expect(captured.args.join('/').replaceAll('\\', '/')).toContain('mcp-server/index.mjs')
+  expect(captured.failOnStartupError).toBe(true)
+  expect(captured.reconnect).toEqual({ enabled: false, initialDelayMs: 10, maxDelayMs: 20, maxAttempts: 1 })
+  // env 快照：纯值（volatile 已深解包——直接 JSON.stringify(volatile) 会塌成 {}，此处必须能解析出值）
+  expect(captured.env.OMD_STATE_DIR).toBe('.omd-test')
+  expect(JSON.parse(captured.env.OMD_TEAM)).toMatchObject({ maxFixLoops: 5, casRetries: 7, staleAfterMs: 300000, heartbeatIntervalMs: 60000 })
+  expect(JSON.parse(captured.env.OMD_MEMORY)).toEqual({ workingTtlDays: 30 })
+  expect(JSON.parse(captured.env.OMD_CODE_INTEL)).toMatchObject({ lsp: expect.objectContaining({ maxRestarts: 9 }) })
+})
+
+test('setup 挂载 MCP：ctx.plugin 缺席（旧宿主）→ failure 降级，不阻断插件', async () => {
+  const { ctx } = mockCtx()
+  ctx.logger = { info() {}, warn() {} }
+  const assetsRoot = await mkdtemp(join(tmpdir(), 'omd-'))
+  await mkdir(join(assetsRoot, 'skills', 'x'), { recursive: true })
+  await writeFile(join(assetsRoot, 'skills', 'x', 'SKILL.zh.md'), '---\nname: x\ndescription: d\n---\nbody\n')
+  await mkdir(join(assetsRoot, 'agents'), { recursive: true })
+  const { probeReport } = await setup(ctx, Config.parse({}), { assetsRoot, defineTool: (x) => x })
+  expect(probeReport.mcpServer.status).toBe('failure')
+  expect(probeReport.memoryTools.status).toBe('ok') // 其余注册不受影响
+})

@@ -57,12 +57,12 @@ dsh plugin --profile <profile> add /path/to/oh-my-deepseekharness
 | 角色 | **33** 个委派角色卡（`omd-agent-*`：OMC 19 + OMX 移植 14——api-reviewer / style-reviewer / performance-reviewer / quality-reviewer / quality-strategist / build-fixer / dependency-expert / information-architect / vision / product-analyst / product-manager / ux-researcher / researcher / explore-harness），各带档位（low 5 / medium 17 / high 11）与职责资产 |
 | Skills | **42** 个（中英双语资产）：3 执行模式 + 规划 + 质量 + 研究 + 记忆 + 基础设施与元 + OMX 移植 4（analyze / best-practice-research / design / performance-goal） |
 | MCP 工具 | **49** 个（内置 `omd-state` MCP server）：`state_*`×5 / `notepad_*`×6 / `prd_*`×4 / `handoff_*`×3 / `team_*`×16（c5/c6/c8 + 领队运行时）/ `trace_*`×4 / `hud_*`×2 / 代码智能×9（`ast_grep_*`×2 + `lsp_*`×7） |
-| Team 运行时 | `lib/team.js`：阶段状态机（team-plan→prd→exec→verify→fix(≤3，状态机强制)→终态）/ 队员 registry（workerId=UUID，runId=owner-epoch，终态不可复活）/ mailbox（in=队员→队长 progress/blocker/done/question，out=队长→队员 nudge/assign/answer）/ heartbeat（`team_heartbeat_scan` 按需扫描 + 插件侧周期检测定时器——检测+呈面，催促归队长模型，绝不自动杀）/ merge 计划（树∩主仓冲突候选 + 建议序，执行归模型） |
-| HUD | 三层承载：web GUI 右侧边栏 `omd-hud` 面板（client half，`lib/client.js`，5s 轮询五要素卡）/ 数据路由 `GET /oh-my-dsh/hud.json` / MCP `hud_render` `hud_summary`（CLI 会话同款摘要） |
-| 代码智能 | `ast_grep_search` / `ast_grep_replace`（结构化语法检索/重写，$VAR/$$$VARS 元变量，dryRun 默认不落盘）；`lsp_start/stop/status/document_symbols/references/definition/diagnostics`（Config `codeIntel.lspServers` 注册表驱动，单实例/崩溃重启 ≤2/随 MCP server 退出回收） |
+| Team 运行时 | `lib/team.js`：阶段状态机（team-plan→prd→exec→verify→fix(≤`team.maxFixLoops`，默认 3，状态机强制)→终态）/ 队员 registry（workerId=UUID，runId=owner-epoch，终态不可复活）/ mailbox（in=队员→队长 progress/blocker/done/question，out=队长→队员 nudge/assign/answer）/ heartbeat（`team_heartbeat_scan` 按需扫描 + 插件侧周期检测定时器——检测+呈面，催促归队长模型，绝不自动杀）/ merge 计划（树∩主仓冲突候选 + 建议序，执行归模型） |
+| HUD | 三层承载：web GUI 右侧边栏 `omd-hud` 面板（client half，`lib/client.js`，`hud.refreshMs` 轮询五要素卡，默认 5s）/ 数据路由 `GET /oh-my-dsh/hud.json` / MCP `hud_render` `hud_summary`（CLI 会话同款摘要） |
+| 代码智能 | `ast_grep_search` / `ast_grep_replace`（结构化语法检索/重写，$VAR/$$$VARS 元变量，dryRun 默认不落盘）；`lsp_start/stop/status/document_symbols/references/definition/diagnostics`（Config `codeIntel.lspServers` 注册表驱动，单实例/崩溃重启 ≤`lsp.maxRestarts`（默认 2）/随 MCP server 退出回收） |
 | Hook 与定时 | c2 keyword-hook（`agent/pre-step` 原生拦截点，唯一 hook 电线）+ team heartbeat 周期检测定时器（Config `team.heartbeatIntervalMs`，默认 60s，0=关闭） |
-| 跨会话记忆 | `omd_memory_set/get/delete`（宿主 storage domain 承载）+ notepad 三区（priority 永久 / working 7 天 / MANUAL 永不清理）+ autopilot/ralph 收尾沉淀检查点（替代 OMC hook 自动 learner） |
-| 路由 | c3 自适应路由（4 特征 + 表上限钳制 + fallback 审计）+ `omd_delegate` 硬路由工具（tier/model 经 spawn 路径强制生效） |
+| 跨会话记忆 | `omd_memory_set/get/delete`（宿主 storage domain 承载）+ notepad 三区（priority 永久 / working `memory.workingTtlDays` 天，默认 7 / MANUAL 永不清理）+ autopilot/ralph 收尾沉淀检查点（替代 OMC hook 自动 learner） |
+| 路由 | c3 自适应路由（4 特征 + `routing.lowMax/mediumMax` 分带 + 表上限钳制 + fallback 审计）+ `omd_delegate` 硬路由工具（tier/model 经 `delegate.provider` 路径强制生效，默认 spawn） |
 
 功能点对齐全景（OMC/OMX 45 功能点：✅34 / ⚠️1 / ❌0 / 🚫10 含决定记录）见 `docs/feature-parity-audit.md`。
 
@@ -70,23 +70,56 @@ dsh plugin --profile <profile> add /path/to/oh-my-deepseekharness
 
 ## 配置 / Config
 
-插件配置（cordis Config，schemastery 校验）：
+插件配置（cordis Config，schemastery 校验；**全部 41 个配置叶均可在 dsh Web GUI（Plugins → oh-my-dsh 行 → Configure）中直接编辑**，
+保存后宿主重放插件即时生效；标 🛰 的键经 `OMD_TEAM` / `OMD_MEMORY` / `OMD_CODE_INTEL` 快照透传给 MCP 子进程，
+重放时自动重挂载）：
 
-| 键 | 类型 / 默认 | 说明 |
-|---|---|---|
-| `language` | `'zh' \| 'en' \| 'both'`，默认 `'zh'` | 资产语言：中文 / 英文 / 中文正文+英文术语 |
-| `tiers.low` | 模型标识，默认 `glm-5.3-flash` | 档位→模型映射；值可为 `provider/model` 或 **`'inherit'`**（继承主会话模型） |
-| `tiers.medium` | 同上，默认 `glm-5.3-flash` | 同上 |
-| `tiers.high` | 同上，默认 `glm-5.3-flash` | 同上 |
-| `roleOverrides` | `dict<string>`，默认 `{}` | 角色级覆盖，优先于 tiers，如 `{ "omd-agent-code-reviewer": "deepseek/deepseek-reasoner" }` |
-| `stateDir` | 字符串，默认 `'.omd'` | 项目状态目录名 |
-| `autopilot.maxIterations` | 自然数 ≥1，默认 `10` | autopilot 最大轮次（`create_goal` 的 max_goal_rounds 默认值） |
-| `autopilot.maxQaCycles` | 自然数 ≥1，默认 `5` | QA 循环上限 |
-| `autopilot.maxValidationRounds` | 自然数 ≥1，默认 `3` | re-validation 轮次上限 |
-| `team.heartbeatIntervalMs` | 自然数，默认 `60000` | 插件侧 heartbeat 周期检测间隔（0=关闭定时器；`team_heartbeat_scan` 按需扫描仍可用） |
-| `team.staleAfterMs` | 自然数 ≥1，默认 `300000` | 队员无心跳 stale 阈值 |
-| `codeIntel.astGrep` | 布尔，默认 `true` | ast_grep_* 开关（`@ast-grep/napi` 缺席时工具显式报错） |
-| `codeIntel.lspServers` | `dict`，默认 `{}` | LSP 注册表：`{ <name>: { command, args?, languages?, env? } }`——语言服务器本体由用户环境提供 |
+| 组 | 键 | 类型 / 默认 | 说明 |
+|---|---|---|---|
+| 基础 | `language` | `'zh' \| 'en' \| 'both'`，默认 `'zh'` | 资产语言：中文 / 英文 / 中文正文+英文术语 |
+| 基础 | `stateDir` | 字符串，默认 `'.omd'` | 项目状态目录名 |
+| HUD | `hud.preset` | `'minimal' \| 'focused' \| 'full'`，默认 `'focused'` | HUD 默认预设（minimal=只标题行，focused=标题+当前焦点，full=全量） |
+| HUD | `hud.refreshMs` | 自然数 ≥1000，默认 `5000` | 侧边栏面板轮询间隔（ms）；非法值回退 5000 |
+| 路由 | `tiers.low` | 模型标识，默认 `glm-5.3-flash` | 档位→模型映射；值可为 `provider/model` 或 **`'inherit'`**（继承主会话模型） |
+| 路由 | `tiers.medium` | 同上，默认 `glm-5.3-flash` | 同上 |
+| 路由 | `tiers.high` | 同上，默认 `glm-5.3-flash` | 同上 |
+| 路由 | `roleOverrides` | `dict<string>`，默认 `{}` | 角色级覆盖，优先于 tiers，如 `{ "omd-agent-code-reviewer": "deepseek/deepseek-reasoner" }` |
+| 路由 | `routing.defaultTier` | `'low' \| 'medium' \| 'high'`，默认 `'medium'` | 表外角色 / 无显式 tier 时的回退档位 |
+| 路由 | `routing.lowMax` | 自然数 0–8，默认 `2` | 特征评分分带：总分 ≤ lowMax → low（须 ≤ mediumMax） |
+| 路由 | `routing.mediumMax` | 自然数 0–8，默认 `5` | 分带：lowMax < 总分 ≤ mediumMax → medium，否则 high |
+| 路由 | `delegate.provider` | `'spawn' \| 'queue' \| 'subprocess'`，默认 `'spawn'` | 派发后端（高级：`queue`/`subprocess` 为保留位，选中即显式报错） |
+| 深访谈 | `deepInterview.ambiguityThreshold` | 0–1 步进 0.05，默认 `0.2` | 模糊度阈值：低于此值跳过追问 |
+| 深访谈 | `deepInterview.maxRounds` | 自然数 ≥1，默认 `20` | 追问最大轮次 |
+| 深访谈 | `deepInterview.softWarningRounds` | 自然数 ≥1，默认 `10` | 软警告轮次（须 ≤ maxRounds，达此轮次提醒收敛） |
+| 自检 | `autopilot.maxIterations` | 自然数 ≥1，默认 `10` | autopilot 最大轮次（`create_goal` 的 max_goal_rounds 默认值） |
+| 自检 | `autopilot.maxQaCycles` | 自然数 ≥1，默认 `5` | QA 循环上限 |
+| 自检 | `autopilot.maxValidationRounds` | 自然数 ≥1，默认 `3` | re-validation 轮次上限 |
+| 团队 | `team.heartbeatIntervalMs` | 自然数，默认 `60000` | 插件侧 heartbeat 周期检测间隔（0=关闭定时器；`team_heartbeat_scan` 按需扫描仍可用） |
+| 团队 | `team.staleAfterMs` 🛰 | 自然数 ≥1，默认 `300000` | 队员无心跳 stale 阈值（调用级参数优先） |
+| 团队 | `team.maxFixLoops` 🛰 | 自然数 ≥1，默认 `3` | fix→exec 回边上限（仅懒建新 run 时写入，存量 run 沿用旧值） |
+| 团队 | `team.casRetries` 🛰 | 自然数 ≥1，默认 `3` | run-state 镜像 CAS 冲突重试次数（调用级参数优先） |
+| MCP | `mcp.transport` | 恒为 `'stdio'`（只读展示） | MCP 传输方式（当前唯一实现） |
+| MCP | `mcp.serverName` | 字符串，默认 `'omd-state'` | MCP server 名 |
+| MCP | `mcp.failOnStartupError` | 布尔，默认 `false` | 启动失败是否阻断插件（`false`=降级为文件直读） |
+| MCP | `mcp.reconnect.enabled` | 布尔，默认 `true` | 断线自动重连 |
+| MCP | `mcp.reconnect.initialDelayMs` | 自然数，默认 `1000` | 重连初始延迟（ms） |
+| MCP | `mcp.reconnect.maxDelayMs` | 自然数，默认 `30000` | 重连延迟上限（ms） |
+| MCP | `mcp.reconnect.maxAttempts` | 自然数，默认 `5` | 重连最大尝试次数 |
+| 代码智能 | `codeIntel.astGrep` | 布尔，默认 `true` | ast_grep_* 开关（`@ast-grep/napi` 缺席时工具显式报错） |
+| 代码智能 | `codeIntel.lspServers` 🛰 | `dict`，默认 `{}` | LSP 注册表：`{ <name>: { command, args?, languages?, env?, initializeTimeoutMs? } }`——语言服务器本体由用户环境提供；条目级 `initializeTimeoutMs` 优先于全局 |
+| 代码智能 | `lsp.initializeTimeoutMs` 🛰 | 自然数 ≥1，默认 `10000` | LSP 握手超时（ms） |
+| 代码智能 | `lsp.requestTimeoutMs` 🛰 | 自然数 ≥1，默认 `15000` | LSP 请求超时（ms） |
+| 代码智能 | `lsp.shutdownTimeoutMs` 🛰 | 自然数 ≥1，默认 `5000` | `lsp_stop` 等 shutdown 回应超时（ms） |
+| 代码智能 | `lsp.maxRestarts` 🛰 | 自然数，默认 `2` | 每 server 崩溃重启预算（0=崩溃即停） |
+| 代码智能 | `lsp.diagnosticsWaitMs` 🛰 | 自然数，默认 `1500` | diagnostics 发布等待（ms） |
+| 代码智能 | `search.defaultMaxResults` 🛰 | 自然数 ≥1，默认 `50` | ast_grep_search 默认返回条数 |
+| 代码智能 | `search.hardMaxResults` 🛰 | 自然数 ≥1，默认 `500` | 搜索返回硬上限（调用值超此被钳制） |
+| 代码智能 | `search.maxFiles` 🛰 | 自然数 ≥1，默认 `2000` | 候选文件扫描上限 |
+| 代码智能 | `search.skipDirs` 🛰 | 字符串数组，默认 8 项（`.git`/`node_modules`/`.omd`/`dist`/`build`/`out`/`.next`/`coverage`） | 检索遍历跳过的目录名（`[]`=一个不跳） |
+| 记忆 | `memory.workingTtlDays` 🛰 | 自然数 ≥1，默认 `7` | notepad working 区保质期（天；priority/MANUAL 永不清理） |
+
+> 兼容说明：顶层 `hudPreset` 仍可读（旧写法），但 GUI 中隐藏——新配置请用 `hud.preset`。
+> 完整设计（含每项中英双语说明、校验规则、读面归属）见 `docs/dsh-gui-config-design.md`。
 
 配置示例：
 
@@ -99,10 +132,19 @@ oh-my-dsh:
     high: deepseek-reasoner
   roleOverrides:
     omd-agent-verifier: deepseek/deepseek-reasoner
+  routing:
+    lowMax: 3             # 放宽 low 分带
+  hud:
+    preset: full
+  deepInterview:
+    ambiguityThreshold: 0.3
   autopilot:
     maxIterations: 15
   team:
     heartbeatIntervalMs: 60000
+    maxFixLoops: 5
+  memory:
+    workingTtlDays: 30
   codeIntel:
     lspServers:
       typescript:

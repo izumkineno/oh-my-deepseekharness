@@ -146,3 +146,32 @@ test('c8 多仓锚定段：树内懒建+豁免向上 marker+残渣随树丢弃�
   const custom = renderProtocol({ config: Config.parse({ stateDir: '.custom' }), probeReport: {}, roles: [] })
   expect(custom).toContain('`.custom/`') // 树内状态目录路径跟随 stateDir
 })
+
+test('F4 bandsLine 正常分支：分带区间跟随 routing.lowMax/mediumMax（默认 0-2/3-5/6-8）', () => {
+  const text = renderProtocol({ config: Config.parse({}), probeReport: {}, roles: [] })
+  expect(text).toContain('0-2→low / 3-5→medium / 6-8→high')
+  const custom = renderProtocol({ config: Config.parse({ routing: { lowMax: 1, mediumMax: 6 } }), probeReport: {}, roles: [] })
+  expect(custom).toContain('0-1→low / 2-6→medium / 7-8→high')
+})
+
+test('F4 bandsLine 矛盾分支：lowMax>mediumMax 如实渲染矛盾而非编造分带', () => {
+  const custom = renderProtocol({ config: Config.parse({ routing: { lowMax: 6, mediumMax: 2 } }), probeReport: {}, roles: [] })
+  expect(custom).toContain('routing.lowMax (6) > routing.mediumMax (2)')
+  expect(custom).toContain('配置矛盾')
+  expect(custom).not.toContain('→low')
+})
+
+test('F4 运行界限插值：maxFixLoops/casRetries/maxRestarts/workingTtlDays 默认+自定义双断言', () => {
+  const text = renderProtocol({ config: Config.parse({}), probeReport: {}, roles: [] })
+  expect(text).toContain('fix 循环 ≤3')
+  expect(text).toContain('崩溃重启≤2')
+  expect(text).toContain('（7 天）')
+  const custom = renderProtocol({
+    config: Config.parse({ team: { maxFixLoops: 9, casRetries: 7 }, codeIntel: { lsp: { maxRestarts: 11 } }, memory: { workingTtlDays: 30 } }),
+    probeReport: {}, roles: [],
+  })
+  expect(custom).toContain('fix 循环 ≤9')
+  expect(custom).toContain('重试 ≤7 次')
+  expect(custom).toContain('崩溃重启≤11')
+  expect(custom).toContain('（30 天）')
+})

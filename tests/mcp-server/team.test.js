@@ -196,3 +196,32 @@ test('team_merge_plan：无冲突时 clean=全部树内改动', async () => {
     await rm(cwd, { recursive: true, force: true })
   }
 })
+
+// ---------- ⑤ OMD_TEAM 快照解析（Config team 段 → staleAfterMs/maxFixLoops/casRetries） ----------
+
+test('env.team 透传：phaseTransition 懒建新 run 写入 maxFixLoops；缺席回退 3', async () => {
+  const cwd = await freshRepo()
+  try {
+    const t = makeTeamTools({ stateDir: '.omd', team: { maxFixLoops: 5 } })
+    const s = await t.phaseTransition({ cwd, runId: 'env-loops', to: 'team-exec', note: '跳过 prd' })
+    expect(s.maxFixLoops).toBe(5)
+    expect((await t.phaseStatus({ cwd, runId: 'env-loops' })).maxFixLoops).toBe(5)
+    const t2 = makeTeamTools({ stateDir: '.omd' })
+    const s2 = await t2.phaseTransition({ cwd, runId: 'env-def', to: 'team-exec', note: '跳过 prd' })
+    expect(s2.maxFixLoops).toBe(3)
+  } finally { await rm(cwd, { recursive: true, force: true }) }
+})
+
+test('env.team 透传：heartbeatScan staleAfterMs 调用值 > env 值 > 300000 默认', async () => {
+  const cwd = await freshRepo()
+  try {
+    const t = makeTeamTools({ stateDir: '.omd', team: { staleAfterMs: 60_000 } })
+    // worker 心跳 2 分钟前（spawnedAt 懒设 lastHeartbeatAt）：env 60s 判定 stale；调用值 300s 判定新鲜
+    const w = await t.registerWorker({ cwd, runId: 'rt', worker: { role: 'x', spawnedAt: new Date(Date.now() - 120_000).toISOString() } })
+    expect((await t.heartbeatScan({ cwd, runId: 'rt' })).stale).toHaveLength(1) // env 60s
+    expect((await t.heartbeatScan({ cwd, runId: 'rt', staleAfterMs: 300_000 })).stale).toHaveLength(0) // 调用值优先
+    const t2 = makeTeamTools({ stateDir: '.omd' })
+    expect((await t2.heartbeatScan({ cwd, runId: 'rt' })).stale).toHaveLength(0) // 默认 300s → 新鲜
+    expect(w.workerId).toBeDefined()
+  } finally { await rm(cwd, { recursive: true, force: true }) }
+})

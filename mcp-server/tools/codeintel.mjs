@@ -4,7 +4,11 @@
 //   原生依赖缺席 → 显式报错，不静默降级成文本 grep）
 // - lsp_*：LSP 语言服务器进程管理（vscode-jsonrpc stdio + vscode-languageserver-protocol，
 //   注册表来自插件 Config codeIntel.lspServers 经 OMD_CODE_INTEL 环境变量注入）；
-//   单 server 单实例、崩溃自动重启 ≤2 次、进程随 MCP server 退出回收
+//   单 server 单实例、崩溃自动重启 ≤maxRestarts 次、进程随 MCP server 退出回收
+// - 可配（OMD_CODE_INTEL ← Config codeIntel 段）：lsp.{initializeTimeoutMs,requestTimeoutMs,
+//   shutdownTimeoutMs,maxRestarts,diagnosticsWaitMs} + search.{defaultMaxResults,hardMaxResults,
+//   maxFiles,skipDirs}——resolveCodeIntelLimits 解析快照，缺席/非法一律回退存量默认值
+//   （直调/旧挂载不炸 server；skipDirs 空数组=显式一个不跳，属合法值不回退）
 import { readdir, readFile, writeFile } from 'node:fs/promises'
 import { join, extname, relative } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -31,9 +35,11 @@ export const LANG_EXT = {
   yaml: ['.yml', '.yaml'],
   markdown: ['.md'],
 }
-const SKIP_DIRS = new Set(['.git', 'node_modules', '.omd', 'dist', 'build', 'out', '.next', 'coverage'])
+/** 默认跳过目录（与 Config codeIntel.search.skipDirs 默认值同源——改一处必须改另一处）。 */
+const DEFAULT_SKIP_DIRS = ['.git', 'node_modules', '.omd', 'dist', 'build', 'out', '.next', 'coverage']
 const DEFAULT_MAX_RESULTS = 50
 const HARD_MAX_RESULTS = 500
+const DEFAULT_MAX_FILES = 2000
 
 /**
  * 嵌套命中过滤（评审修复#3，实测文件损坏）：findAll 会返回嵌套命中（如 `$A + $B`
@@ -56,9 +62,10 @@ async function defaultLoadNapi() {
   }
 }
 
-async function collectFiles(cwd, lang, paths, maxFiles = 2000) {
+async function collectFiles(cwd, lang, paths, maxFiles = 2000, skip = DEFAULT_SKIP_DIRS) {
   const exts = LANG_EXT[lang]
   if (!exts) throw new Error(`ast_grep: 未知语言 '${lang}'（支持: ${Object.keys(LANG_EXT).join('/')}）`)
+  const skipSet = new Set(skip)
   const roots = (paths?.length ? paths : ['.']).map(p => join(cwd, p))
   const out = []
   let truncated = false // 评审修复#14：截断不再静默
@@ -70,7 +77,7 @@ async function collectFiles(cwd, lang, paths, maxFiles = 2000) {
       if (out.length >= maxFiles) { truncated = true; return }
       const full = join(dir, e.name)
       if (e.isDirectory()) {
-        if (!SKIP_DIRS.has(e.name)) await walk(full)
+        if (!skipSet.has(e.name)) await walk(full)
       } else if (exts.includes(extname(e.name).toLowerCase())) {
         out.push(full)
       }
@@ -101,7 +108,38 @@ export function substituteRewrite(match, rewrite) {
 const MAX_RESTARTS = 2
 const DEFAULT_INITIALIZE_TIMEOUT_MS = 10_000
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000
-const SHUTDOWN_TIMEOUT_MS = 5_000
+const DEFAULT_DIAGNOSTICS_WAIT_MS = 1500
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000
+
+/** 正数超时解析：注册项自带值优先，缺席/非法回退全局值（损坏注册项不炸 server）。 */
+function posTimeout(v, fb) {
+  return (typeof v === 'number' && Number.isFinite(v) && v > 0) ? v : fb
+}
+
+/**
+ * MCP 进程 codeIntel 配置快照解析（env.codeIntel ← OMD_CODE_INTEL ← Config codeIntel 段）。
+ * 缺席/非法（非数字/非正/NaN）一律回退存量默认值——直调、旧挂载、损坏 env 都不炸 server。
+ * 计数类取整（env JSON 未经 schema 校验时防浮点 maxResults/maxRestarts）。
+ */
+export function resolveCodeIntelLimits(env) {
+  const lspCfg = env?.codeIntel?.lsp ?? {}
+  const searchCfg = env?.codeIntel?.search ?? {}
+  const posOr = (v, fb) => (typeof v === 'number' && Number.isFinite(v) && v > 0) ? v : fb
+  const nonNegOr = (v, fb) => (typeof v === 'number' && Number.isFinite(v) && v >= 0) ? v : fb
+  // 字符串数组：全字符串才合法（含空数组=显式一个不跳）；非数组/混入非字符串 → 回退默认
+  const strArrOr = (v, fb) => (Array.isArray(v) && v.every(s => typeof s === 'string')) ? v : fb
+  return {
+    initializeTimeoutMs: posOr(lspCfg.initializeTimeoutMs, DEFAULT_INITIALIZE_TIMEOUT_MS),
+    requestTimeoutMs: posOr(lspCfg.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS),
+    shutdownTimeoutMs: posOr(lspCfg.shutdownTimeoutMs, DEFAULT_SHUTDOWN_TIMEOUT_MS),
+    maxRestarts: Math.floor(nonNegOr(lspCfg.maxRestarts, MAX_RESTARTS)),
+    diagnosticsWaitMs: nonNegOr(lspCfg.diagnosticsWaitMs, DEFAULT_DIAGNOSTICS_WAIT_MS),
+    defaultMaxResults: Math.floor(posOr(searchCfg.defaultMaxResults, DEFAULT_MAX_RESULTS)),
+    hardMaxResults: Math.floor(posOr(searchCfg.hardMaxResults, HARD_MAX_RESULTS)),
+    maxFiles: Math.floor(posOr(searchCfg.maxFiles, DEFAULT_MAX_FILES)),
+    skipDirs: strArrOr(searchCfg.skipDirs, DEFAULT_SKIP_DIRS),
+  }
+}
 
 /** vscode-jsonrpc/node 的动态导入（optionalDependencies 被 --no-optional 跳过时报可行动错误，评审修复#19）。 */
 async function loadJsonrpc() {
@@ -145,6 +183,7 @@ function armExitHook() {
 export function makeCodeIntelTools(env, opts = {}) {
   const loadNapi = opts.loadNapi ?? defaultLoadNapi
   const registry = env?.codeIntel?.lspServers ?? {}
+  const limits = resolveCodeIntelLimits(env)
   /** 运行中 server：name → { child, connection, openDocs:Set, diagnostics:Map, restarts, starting } */
   const servers = new Map()
   /** 同名 server 并发启动去重（name → in-flight Promise）。 */
@@ -155,12 +194,12 @@ export function makeCodeIntelTools(env, opts = {}) {
 
   // ---- ast-grep ----
 
-  async function astGrepSearch({ cwd, pattern, lang, paths, maxResults = DEFAULT_MAX_RESULTS }) {
+  async function astGrepSearch({ cwd, pattern, lang, paths, maxResults = limits.defaultMaxResults }) {
     if (env?.codeIntel?.astGrep === false) throw new Error('ast_grep: 已被配置 codeIntel.astGrep=false 禁用')
     if (typeof pattern !== 'string' || !pattern) throw new Error('ast_grep_search: pattern 必填')
     const napi = await loadNapi()
-    const limit = Math.min(Math.max(1, maxResults), HARD_MAX_RESULTS)
-    const { files, truncated: filesTruncated } = await collectFiles(cwd, lang, paths)
+    const limit = Math.min(Math.max(1, maxResults), limits.hardMaxResults)
+    const { files, truncated: filesTruncated } = await collectFiles(cwd, lang, paths, limits.maxFiles, limits.skipDirs)
     const matches = []
     let truncated = false
     for (const file of files) {
@@ -184,11 +223,11 @@ export function makeCodeIntelTools(env, opts = {}) {
     return { pattern, lang, scannedFiles: files.length, filesTruncated, count: matches.length, truncated, matches }
   }
 
-  async function astGrepReplace({ cwd, pattern, rewrite, lang, paths, dryRun = true, maxResults = HARD_MAX_RESULTS }) {
+  async function astGrepReplace({ cwd, pattern, rewrite, lang, paths, dryRun = true, maxResults = limits.hardMaxResults }) {
     if (env?.codeIntel?.astGrep === false) throw new Error('ast_grep: 已被配置 codeIntel.astGrep=false 禁用')
     if (typeof rewrite !== 'string' || !rewrite) throw new Error('ast_grep_replace: rewrite 必填（$VAR 元变量引用 pattern 捕获）')
     const napi = await loadNapi()
-    const { files, truncated: filesTruncated } = await collectFiles(cwd, lang, paths)
+    const { files, truncated: filesTruncated } = await collectFiles(cwd, lang, paths, limits.maxFiles, limits.skipDirs)
     const edits = []
     let changedFiles = 0
     for (const file of files) {
@@ -213,7 +252,7 @@ export function makeCodeIntelTools(env, opts = {}) {
       }
       if (!dryRun) await writeFile(file, next, 'utf8')
     }
-    return { pattern, rewrite, lang, dryRun, changedFiles, filesTruncated, editCount: edits.length, edits: edits.slice(0, HARD_MAX_RESULTS) }
+    return { pattern, rewrite, lang, dryRun, changedFiles, filesTruncated, editCount: edits.length, edits: edits.slice(0, limits.hardMaxResults) }
   }
 
   // ---- LSP ----
@@ -305,7 +344,7 @@ export function makeCodeIntelTools(env, opts = {}) {
       },
       workspaceFolders: [{ uri: URI.file(cwd).toString(), name: 'workspace' }],
       clientInfo: { name: 'omd-codeintel', version: '0.4.0' },
-    }), entry.initializeTimeoutMs ?? DEFAULT_INITIALIZE_TIMEOUT_MS, `server '${name}' initialize 握手`)
+    }), posTimeout(entry.initializeTimeoutMs, limits.initializeTimeoutMs), `server '${name}' initialize 握手`)
     initReq.catch(() => {}) // race 已定胜负后，迟到的 initialize 拒绝不再上报（防 unhandled rejection）
     await Promise.race([initReq, died])
     handshakeDone = true
@@ -322,8 +361,8 @@ export function makeCodeIntelTools(env, opts = {}) {
     if (starting.has(name)) return starting.get(name)
     const entry = registryEntry(name)
     const crashes = crashLedger.get(name) ?? 0
-    if (crashes >= MAX_RESTARTS)
-      throw new Error(`lsp: server '${name}' 崩溃重启已达上限（${crashes}/${MAX_RESTARTS}）——检查语言服务器安装后调 lsp_stop 复位预算再 lsp_start`)
+    if (crashes >= limits.maxRestarts)
+      throw new Error(`lsp: server '${name}' 崩溃重启已达上限（${crashes}/${limits.maxRestarts}）——检查语言服务器安装后调 lsp_stop 复位预算再 lsp_start`)
     const p = (async () => {
       const handle = await connect(name, entry, cwd)
       handle.restarts = crashes
@@ -361,7 +400,7 @@ export function makeCodeIntelTools(env, opts = {}) {
     const handle = servers.get(server)
     crashLedger.delete(server) // 显式 stop 复位崩溃预算（允许干净地再 start；未运行也复位）
     if (!handle) return { ok: true, server, note: '未运行' }
-    try { await withTimeout(handle.connection.sendRequest('shutdown'), SHUTDOWN_TIMEOUT_MS, `server '${server}' shutdown`) } catch { /* 已死/不回应也继续回收 */ }
+    try { await withTimeout(handle.connection.sendRequest('shutdown'), limits.shutdownTimeoutMs, `server '${server}' shutdown`) } catch { /* 已死/不回应也继续回收 */ }
     try { await handle.connection.sendNotification('exit') } catch { /* 同上 */ }
     handle.restarts = 0 // 显式 stop 重置重启预算（允许干净地再 start）
     servers.delete(server)
@@ -389,7 +428,7 @@ export function makeCodeIntelTools(env, opts = {}) {
     const uri = await ensureDoc(handle, abs)
     const result = await withTimeout(handle.connection.sendRequest('textDocument/documentSymbol', {
       textDocument: { uri },
-    }), DEFAULT_REQUEST_TIMEOUT_MS, `server '${server}' documentSymbol`)
+    }), limits.requestTimeoutMs, `server '${server}' documentSymbol`)
     const flat = []
     const walk = (syms, container) => {
       for (const s of syms ?? []) {
@@ -415,7 +454,7 @@ export function makeCodeIntelTools(env, opts = {}) {
       textDocument: { uri },
       position: { line: line - 1, character: character - 1 }, // 输入 1-based，LSP 0-based
       context: { includeDeclaration: true },
-    }), DEFAULT_REQUEST_TIMEOUT_MS, `server '${server}' references`)
+    }), limits.requestTimeoutMs, `server '${server}' references`)
     return { server, file, count: result?.length ?? 0, locations: (result ?? []).map(normLoc) }
   }
 
@@ -426,12 +465,12 @@ export function makeCodeIntelTools(env, opts = {}) {
     const result = await withTimeout(handle.connection.sendRequest('textDocument/definition', {
       textDocument: { uri },
       position: { line: line - 1, character: character - 1 },
-    }), DEFAULT_REQUEST_TIMEOUT_MS, `server '${server}' definition`)
+    }), limits.requestTimeoutMs, `server '${server}' definition`)
     const locs = Array.isArray(result) ? result : (result ? [result] : [])
     return { server, file, count: locs.length, locations: locs.map(l => normLoc(l?.targetUri ? { uri: l.targetUri, range: l.targetSelectionRange ?? l.targetRange } : l)) }
   }
 
-  async function lspDiagnostics({ cwd, server, file, waitMs = 1500 }) {
+  async function lspDiagnostics({ cwd, server, file, waitMs = limits.diagnosticsWaitMs }) {
     const handle = await ensureServer(server, cwd)
     const abs = join(cwd, file)
     const uri = await ensureDoc(handle, abs)
@@ -465,13 +504,14 @@ export function makeCodeIntelTools(env, opts = {}) {
 
 export function registerCodeIntelTools(server, env) {
   const t = makeCodeIntelTools(env)
+  const limits = resolveCodeIntelLimits(env)
   const jsonOut = (v) => ({ content: [{ type: 'text', text: typeof v === 'string' ? v : JSON.stringify(v) }] })
   const base = { cwd: z.string() }
   const astBase = { ...base, pattern: z.string(), lang: z.string(), paths: z.array(z.string()).optional() }
 
   server.registerTool('ast_grep_search', {
     description: 'ast-grep 结构化语法检索（$VAR/$$$VARS 元变量模式；按语言过滤文件；返回 file:line 命中，有界）',
-    inputSchema: { ...astBase, maxResults: z.number().int().min(1).max(500).optional() },
+    inputSchema: { ...astBase, maxResults: z.number().int().min(1).max(limits.hardMaxResults).optional() },
   }, async a => jsonOut(await t.astGrepSearch(a)))
 
   server.registerTool('ast_grep_replace', {
@@ -483,7 +523,7 @@ export function registerCodeIntelTools(server, env) {
   const lspPos = { ...lspBase, file: z.string(), line: z.number().int().min(1), character: z.number().int().min(1) }
 
   server.registerTool('lsp_start', {
-    description: '启动已注册的语言服务器（Config codeIntel.lspServers 注册表；单实例，崩溃重启 ≤2）',
+    description: `启动已注册的语言服务器（Config codeIntel.lspServers 注册表；单实例，崩溃重启 ≤${limits.maxRestarts}）`,
     inputSchema: lspBase,
   }, async a => jsonOut(await t.lspStart(a)))
 

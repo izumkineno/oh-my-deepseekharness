@@ -4,7 +4,7 @@ import { test, expect } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { HUD_ROUTE_PATH, hudSnapshot, makeHudHandler, registerHudRoute } from '../../lib/hud-route.js'
+import { HUD_ROUTE_PATH, hudSnapshot, makeHudHandler, registerHudRoute, resolveRefreshMs } from '../../lib/hud-route.js'
 import { makeStateTools } from '../../mcp-server/tools/state.mjs'
 import { makeNotepadTools } from '../../mcp-server/tools/notepad.mjs'
 
@@ -15,7 +15,7 @@ function mockRes() {
   return r
 }
 
-test('hudSnapshot：真实 .omd 状态 → 五要素摘要 + 至多 8 行卡 + detail/modeCatalog/preset', async () => {
+test('hudSnapshot：真实 .omd 状态 → 五要素摘要 + 至多 8 行卡 + detail/modeCatalog/preset/refreshMs', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'omd-hudr-'))
   try {
     const env = { stateDir: '.omd' }
@@ -29,9 +29,11 @@ test('hudSnapshot：真实 .omd 状态 → 五要素摘要 + 至多 8 行卡 + d
     expect(snap.summary).toMatchObject({ mode: 'autopilot', round: 2, agents: 1 })
     expect(snap.summary.todo).toMatchObject({ working: 1 })
     expect(snap.card.split('\n').length).toBeLessThanOrEqual(8)  // B1′：恰 6 行 → ≤8
-    // AC5：顶层键集白名单锁定（现有键 ∪ {detail, modeCatalog, preset}）
+    // AC5：顶层键集白名单锁定（现有键 ∪ {detail, modeCatalog, preset, refreshMs}；
+    // refreshMs=Config hud.refreshMs 下发，client 自适应轮询，不进 MCP wire）
     expect(Object.keys(snap).sort())
-      .toEqual(['at', 'card', 'cwd', 'detail', 'modeCatalog', 'ok', 'preset', 'summary'])
+      .toEqual(['at', 'card', 'cwd', 'detail', 'modeCatalog', 'ok', 'preset', 'refreshMs', 'summary'])
+    expect(snap.refreshMs).toBe(5000) // 缺省 5s（与 Config 默认同值）
     expect(snap.detail.primary).toBe('autopilot')
     expect(snap.detail.modes[0]).toMatchObject({ mode: 'autopilot', sessionId: 's1', label: '自动驾驶' })
     expect(snap.detail.tier).toBe('ok') // U3/O2：tier 并入 detail 下发（lib 单源 → client 优先采用；顶层键集白名单不变）
@@ -48,6 +50,34 @@ test('hudSnapshot preset（AC11/S8）：缺省 focused；非法回退 focused；
     expect((await hudSnapshot({ cwd, stateDir: '.omd', config: { hudPreset: 'no-such' } })).preset).toBe('focused')
     expect((await hudSnapshot({ cwd, stateDir: '.omd', config: { hudPreset: 'full' } })).preset).toBe('full')
     expect((await hudSnapshot({ cwd, stateDir: '.omd', config: { hudPreset: 'minimal' } })).preset).toBe('minimal')
+  } finally { await rm(cwd, { recursive: true, force: true }) }
+})
+
+test('hudSnapshot preset：hud.preset 嵌套键优先，hudPreset 别名兜底', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'omd-hudr-'))
+  try {
+    expect((await hudSnapshot({ cwd, stateDir: '.omd', config: { hud: { preset: 'full' } } })).preset).toBe('full')
+    expect((await hudSnapshot({ cwd, stateDir: '.omd', config: { hud: { preset: 'minimal' }, hudPreset: 'full' } })).preset).toBe('minimal')
+    expect((await hudSnapshot({ cwd, stateDir: '.omd', config: { hud: { preset: 'no-such' }, hudPreset: 'full' } })).preset).toBe('focused')
+  } finally { await rm(cwd, { recursive: true, force: true }) }
+})
+
+test('resolveRefreshMs：缺省/非法回退 5000；合法透传', () => {
+  expect(resolveRefreshMs(undefined)).toBe(5000)
+  expect(resolveRefreshMs({})).toBe(5000)
+  expect(resolveRefreshMs({ hud: {} })).toBe(5000)
+  expect(resolveRefreshMs({ hud: { refreshMs: 999 } })).toBe(5000)
+  expect(resolveRefreshMs({ hud: { refreshMs: 'fast' } })).toBe(5000)
+  expect(resolveRefreshMs({ hud: { refreshMs: NaN } })).toBe(5000)
+  expect(resolveRefreshMs({ hud: { refreshMs: 1000 } })).toBe(1000)
+  expect(resolveRefreshMs({ hud: { refreshMs: 15000 } })).toBe(15000)
+})
+
+test('hudSnapshot refreshMs：Config hud.refreshMs 下发', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'omd-hudr-'))
+  try {
+    expect((await hudSnapshot({ cwd, stateDir: '.omd', config: { hud: { refreshMs: 15000 } } })).refreshMs).toBe(15000)
+    expect((await hudSnapshot({ cwd, stateDir: '.omd', config: { hud: { refreshMs: 10 } } })).refreshMs).toBe(5000)
   } finally { await rm(cwd, { recursive: true, force: true }) }
 })
 
